@@ -1,0 +1,141 @@
+---
+title: "Module 6 Project Team 4"
+author: "Leanna Knight, Sofia Rugova, and Ella Underwood"
+date: "2024-11-11"
+output: html_document
+bibliography: BIOL3140.bib
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rnaturalearth)
+library(rnaturalearthhires)
+library(sf)
+library(tidyverse)
+library(stars)
+library(ggplot2)
+library(mapview)
+library(dplyr)
+library(spdep)
+library(randomForest)
+library(knitr)
+```
+
+## Introduction
+ 
+  In the U.S., white-tailed deer (WTD, *Odocoileus virginianus*) numbers have recovered from a downward spiral in the early 1900s, with populations now estimated at 30 million. In recent decades, WTD populations have increased sharply in New England, especially in suburban areas. This raises important questions about the factors driving this increase and how spatial patterns in WTD harvest are related to land-use variations, especially in New Hampshire, where land-use types range from forested to urban areas. Spatial analysis can help us understand these relationships by accounting for local variations that traditional statistical methods may miss.
+  
+  Previous studies have shown that harvest data, particularly metrics like yearling body weight and antler points, can predict WTD population densities @keyser2005population. This study will investigate spatial heterogeneity in WTD harvest patterns and their association with land-use types across New Hampshire. By using spatial analysis, we aim to provide insights that can inform more effective wildlife management practices.
+
+
+## Methods
+  
+  This study investigated the relationship between white-tailed deer harvest rates and land use patterns across New Hampshire towns. We obtained deer harvest data from an online repository, which provided town-level information on Harvest per Square Mile (HSM), and utilized a shapefile for New Hampshire's political boundaries. High-resolution land cover data was acquired from a GeoTIFF file. The deer harvest data was processed to standardize town names and calculate mean HSM values. We transformed the land use data to match the coordinate reference system of the shapefile, downsampled it for efficiency, and cropped it to the state boundaries. We then merged these datasets through spatial joins, calculating the proportion of each land use type within towns, resulting in a comprehensive dataset that included town names, HSM values, and land use proportions.
+  
+  For statistical analysis, we employed Random Forest modeling to explore the relationship between land use patterns and deer harvest rates. An initial Random Forest model was constructed with HSM as the response variable, followed by optimization of the 'mtry' parameter to improve model performance. The final model was developed using optimized parameters. To visualize our findings, we generated a variable importance plot to illustrate the significance of different land use types in predicting HSM and created an interactive map of New Hampshire color-coded by HSM values to depict spatial distribution. This integrated approach combined spatial, ecological, and statistical methods to analyze the complex relationships between land use patterns and deer harvest rates in New Hampshire.
+
+##Results
+
+```{r, "load in data"}
+deer <- read_csv("https://bcorgbio.github.io/class/data/NH_deer.txt") %>% 
+  mutate(TOWN=str_replace(TOWN,"_"," ") %>% str_to_title()
+         ) %>% 
+  group_by(TOWN) %>% 
+  summarise_at("HSM",mean)
+
+nh <- read_sf("NH/New_Hampshire_Political_Boundaries.shp") %>%
+  rename(TOWN=pbpNAME)
+
+ggplot() +
+  geom_sf(data = nh)+
+  geom_sf_text(data=nh %>% filter(TOWN=="Rochester"),aes(label=TOWN))+
+  theme_void() +
+  labs(
+    title = "New Hampshire",
+    caption = "The geopolitical boundary of New Hampshire and all of its towns"
+  )
+
+lu <- stars::read_stars("land_use/NLCD_2021_Land_Cover_L48_20230630_qtPZ6zMaTAibmibqfd37.tiff")
+
+lu2 <- lu %>% 
+ setNames("land_use") %>% 
+     st_transform( st_crs(nh)) %>% 
+  st_downsample(30,mean)
+```
+
+```{r, "analysis"}
+nh_deer <- left_join(nh, deer, by = "TOWN") %>%
+  select(TOWN, HSM, geometry)
+
+nh_lu <- lu2 %>%
+  st_as_sf() %>% 
+  st_join(nh) %>% 
+  select(land_use, TOWN, geometry)
+
+nh_dat <- nh_lu %>%
+  st_drop_geometry() %>% 
+  group_by(TOWN, land_use, .drop = FALSE) %>%
+  count() %>%
+  group_by(TOWN) %>%
+  mutate(prop = n / sum(n)) %>%
+  as.data.frame() %>% 
+  dplyr::select(-n) %>% 
+  pivot_wider(names_from = land_use, values_from = prop, values_fill = 0) %>%
+  left_join(nh_deer %>% st_drop_geometry(), by = "TOWN")
+
+arc_sin <- function(x) asin(sqrt(x))
+
+rf_dat <- nh_dat %>% 
+  st_drop_geometry() %>% 
+  ungroup %>% 
+  dplyr::select(-TOWN) %>%
+  mutate(across(-HSM,arc_sin)) %>% 
+  filter(!is.na(HSM)) %>% 
+  select(where(~sum(.)!=0))
+
+colnames(rf_dat) <- str_replace_all(string=colnames(rf_dat), pattern=" |\\,|\\/",repl="")
+
+rf <- randomForest(HSM~.,data=rf_dat, mtry=2, importance=TRUE, ntree=1000)
+
+varImpPlot(rf, type=1)
+
+tuneRF(x=rf_dat %>% select(-HSM),
+       rf_dat$HSM,
+       stepFactor=1.5,
+       ntreeTry=1000,
+       trace=F,
+       mtryStart=5,
+       improve=0.001)
+
+rf2 <- randomForest(HSM~.,data=rf_dat, mtry=8, importance=TRUE, ntree=1000)
+
+varImpPlot(rf2,type=1)
+
+mapview(nh_deer, zcol = "HSM")
+
+mt <- nh_deer[!is.na(nh_deer$HSM), ]
+neighbors <- poly2nb(mt)
+weights <- nb2listw(neighbors, style = "W")
+moran_test <- moran.test(mt$HSM, listw = weights)
+print(moran_test)
+```
+
+  Spatial data showed a diverse range of land-use types across towns, including forested, agricultural, and developed areas, with varying proportions. The random forest analysis highlighted the importance of certain land-use types in explaining the variation in HSM. Hay Pasture land use constantly had the highest %IncMSE. The tuning of mtry indicated that a mtry value of 8 had the lowest OOB error. 
+
+
+## Discussion
+
+  The goal of this project was to determine if there is spatial heterogeneity in white-tailed deer (WTD) harvest, and if so, is there spatial heterogeneity in white-tailed deer harvest associated with land-use patterns. A pretty interactive map was constructed to establish if WTD harvest in New Hampshire is spatially autocorrelated. The results of the map indicated that WTD harvest is positively spatially autocorrelated. There were lower pockets of WTD harvest in the northern parts of New Hampshire and higher pockets of WTD in the southern parts. To further prove that WTD harvest is spatially autocorrelated, a Moran’s I statistical test was used. The Moran’s I value was 0.693 which is positive and significantly different from 0, suggesting that there is evidence for spatial clustering and suggests positive spatial autocorrelation. The p-value was greater than 2.2e-16 which is highly significant and implies a rejection of spatial randomness. Thus, positive spatial correlation suggests that high values of harvest are clustered nearby other places of high values and vice versa.
+  
+  To determine if land-use patterns predict WTD harvest per square mile (HSM), a random forest model was used. This random forest model was then tuned to optimize “mtry” which helped better assess the model’s outcome. The result of the random forest model indicated that land-use types predict white-tailed deer habitat. The habitat that consistently maintained the highest %IncMSE value is the Hay Pasture, thus, it is implied that Hay Pasture predicts WTD harvest the best. However, other land-uses such as Woody Wetlands, Deciduous Forests, and Mixed Forests also maintained relatively high %IncMSE values, thus also predicting WTD harvest, but not as significantly as Hay Pasture. These findings contribute to the broader topic regarding WTD harvest because WTD harvest being spatially autocorrelated and influenced by land-use is helpful in determining where habitat preservation efforts should be focused. This would help keep the WTD population flourishing. This analysis furthers the research in the article regarding impact of habitat heterogeneity on white-tailed deer population dynamics @vercauteren1998effects. The study evaluates the impact of agricultural land and forest borders on creating ideal conditions for WTD which can influence their movement patterns and population densities. It was determined that various agricultural practices impacted the population densities of WTD in the area. This is relevant to the research questions in our project because determining which land-use patterns influence WTD harvest the most allows environmentalists to properly preserve these habitats and reduce harmful agricultural practices to better facilitate WTD harvest.
+
+## Author Contributions
+
+* Ella ~ code analysis, methods
+* Leanna ~ code analysis, discussion
+* Sofia ~  code analysis, introduction and results
+
+## References
+
+
+
+
